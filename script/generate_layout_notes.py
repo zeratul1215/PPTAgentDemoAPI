@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -721,6 +722,12 @@ def _parse_args() -> argparse.Namespace:
         help="Env var names to check for API key (default: GEMINI_API_KEY GOOGLE_API_KEY)",
     )
     p.add_argument("--save-raw", action="store_true", help="Save raw model output next to result.")
+    p.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=3,
+        help="Max concurrent in-flight model calls across pages (default: 3).",
+    )
     return p.parse_args()
 
 
@@ -821,27 +828,33 @@ def main() -> int:
 
     updated_plan = json.loads(json.dumps(plan))
 
-    with genai.Client(api_key=api_key) as client:
-        for pno in range(page_start, page_end + 1):
-            idx = pno - 1
-            if idx >= len(pages):
-                break
-            page_obj = pages[idx]
-            if not isinstance(page_obj, dict):
-                continue
+    last_page = min(page_end, len(pages))
+    pages_to_run = [
+        pno for pno in range(page_start, last_page + 1) if (out_dir / f"page_{pno:03d}" / "request.json").exists()
+    ]
+    max_conc = max(1, int(args.max_concurrency))
 
-            page_out_dir = out_dir / f"page_{pno:03d}"
-            page_out_dir.mkdir(parents=True, exist_ok=True)
+    def _process_one_page(pno: int) -> tuple[int, str] | None:
+        idx = pno - 1
+        if idx < 0 or idx >= len(pages):
+            return None
 
-            page_png = _page_png_path(pages_png_dir, pno)
-            meta = _read_json(page_out_dir / "request.json")
-            if not isinstance(meta, dict):
-                (page_out_dir / "error.txt").write_text("invalid request.json\n", encoding="utf-8")
-                continue
+        page_out_dir = out_dir / f"page_{pno:03d}"
+        page_out_dir.mkdir(parents=True, exist_ok=True)
 
-            raw: str = ""
-            layout_notes: str = ""
-            last_err: Exception | None = None
+        page_png = _page_png_path(pages_png_dir, pno)
+        if not page_png.exists():
+            raise RuntimeError(f"missing page_png: {page_png}")
+
+        meta = _read_json(page_out_dir / "request.json")
+        if not isinstance(meta, dict):
+            (page_out_dir / "error.txt").write_text("invalid request.json\n", encoding="utf-8")
+            return None
+
+        raw: str = ""
+        layout_notes: str = ""
+        last_err: Exception | None = None
+        with genai.Client(api_key=api_key) as client:
             for attempt in range(max(0, int(args.retries)) + 1):
                 try:
                     raw, layout_notes = _call_gemini_layout_notes(
@@ -874,36 +887,53 @@ def main() -> int:
                     )
                     time.sleep(max(0.0, float(sleep_s)))
 
-            if last_err is not None:
-                (page_out_dir / "error.txt").write_text(
-                    f"Model call failed after retries. error={type(last_err).__name__}: {last_err}\n",
-                    encoding="utf-8",
-                )
-                if args.save_raw and raw:
-                    (page_out_dir / "raw.txt").write_text(raw or "", encoding="utf-8")
-                continue
+        if last_err is not None:
+            (page_out_dir / "error.txt").write_text(
+                f"Model call failed after retries. error={type(last_err).__name__}: {last_err}\n",
+                encoding="utf-8",
+            )
+            if args.save_raw and raw:
+                (page_out_dir / "raw.txt").write_text(raw or "", encoding="utf-8")
+            return None
 
-            if not isinstance(layout_notes, str) or not layout_notes.strip():
-                (page_out_dir / "error.txt").write_text(
-                    "Model output is empty/invalid layout_notes text.\n\nRAW:\n" + (raw or "") + "\n",
-                    encoding="utf-8",
-                )
-                if args.save_raw:
-                    (page_out_dir / "raw.txt").write_text(raw or "", encoding="utf-8")
-                continue
-
-            (page_out_dir / "layout_notes.txt").write_text(layout_notes.strip() + "\n", encoding="utf-8")
-            warnings = _validate_layout_notes(meta=meta, layout_notes=layout_notes)
-            if warnings:
-                _write_json(page_out_dir / "warnings.json", {"warnings": warnings})
+        if not isinstance(layout_notes, str) or not layout_notes.strip():
+            (page_out_dir / "error.txt").write_text(
+                "Model output is empty/invalid layout_notes text.\n\nRAW:\n" + (raw or "") + "\n",
+                encoding="utf-8",
+            )
             if args.save_raw:
                 (page_out_dir / "raw.txt").write_text(raw or "", encoding="utf-8")
+            return None
 
-            # Update plan copy in memory.
+        (page_out_dir / "layout_notes.txt").write_text(layout_notes.strip() + "\n", encoding="utf-8")
+        warnings = _validate_layout_notes(meta=meta, layout_notes=layout_notes)
+        if warnings:
+            _write_json(page_out_dir / "warnings.json", {"warnings": warnings})
+        if args.save_raw:
+            (page_out_dir / "raw.txt").write_text(raw or "", encoding="utf-8")
+        return idx, str(layout_notes or "")
+
+    results: dict[int, str] = {}
+    with ThreadPoolExecutor(max_workers=max_conc) as ex:
+        futures = {ex.submit(_process_one_page, pno): pno for pno in pages_to_run}
+        for fut in as_completed(futures):
+            pno = futures[fut]
             try:
-                updated_plan["pages"][idx]["layout_notes"] = str(layout_notes or "")
-            except Exception:
-                pass
+                r = fut.result()
+                if r is not None:
+                    idx, notes = r
+                    results[int(idx)] = str(notes)
+            except Exception as e:
+                for f in futures:
+                    f.cancel()
+                raise SystemExit(f"page {pno}: {type(e).__name__}: {e}")
+
+    # Update plan copy in memory.
+    for idx, notes in sorted(results.items(), key=lambda kv: kv[0]):
+        try:
+            updated_plan["pages"][idx]["layout_notes"] = notes
+        except Exception:
+            continue
 
     if args.write_plan:
         _write_json(out_dir / "plan.with_layout_notes.json", updated_plan)

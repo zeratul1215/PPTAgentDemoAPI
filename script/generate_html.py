@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -508,6 +509,12 @@ def _parse_args() -> argparse.Namespace:
         help="Env var names to check for API key (default: GEMINI_API_KEY GOOGLE_API_KEY)",
     )
     p.add_argument("--save-raw", action="store_true", help="Save raw model output per page.")
+    p.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=3,
+        help="Max concurrent in-flight model calls across pages (default: 3).",
+    )
 
     p.add_argument("--title", type=str, default="PPTAgent", help="HTML <title> text (default: PPTAgent)")
     return p.parse_args()
@@ -620,27 +627,32 @@ def main() -> int:
     api_key = _get_api_key(args)
     genai, _types, genai_errors = _import_google_genai()
 
-    with genai.Client(api_key=api_key) as client:
-        for pno in range(page_start, page_end + 1):
-            out_page_dir = out_bundle_dir / f"page_{pno:03d}"
-            out_page_dir.mkdir(parents=True, exist_ok=True)
+    max_conc = max(1, int(args.max_concurrency))
+    base_href = _rel_base_href(from_dir=chunks_dir, to_dir=out_bundle_dir)
 
+    pages_to_run = list(range(page_start, page_end + 1))
+
+    def _process_one_page(pno: int) -> None:
+        out_page_dir = out_bundle_dir / f"page_{pno:03d}"
+        out_page_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
             pdir = layout_dir / f"page_{pno:03d}"
             meta_path = pdir / "request.json"
             notes_path = pdir / "layout_notes.txt"
             if not meta_path.exists() or not notes_path.exists():
-                continue
+                return
             meta = _read_json(meta_path)
             if not isinstance(meta, dict):
-                continue
+                return
             page_png_path = meta.get("page_png_path")
             if not isinstance(page_png_path, str) or not page_png_path.strip():
                 _write_text(out_page_dir / "error.txt", f"missing meta_json.page_png_path for page {pno}\n")
-                continue
+                return
             page_png = Path(page_png_path).expanduser()
             if not page_png.exists():
                 _write_text(out_page_dir / "error.txt", f"page_png not found for page {pno}: {page_png}\n")
-                continue
+                return
             page_png_bytes = page_png.read_bytes()
             layout_notes = notes_path.read_text(encoding="utf-8", errors="replace").strip()
             notes_brief, notes_full = _condense_layout_notes(layout_notes)
@@ -661,74 +673,76 @@ def main() -> int:
 
             raw: str = ""
             last_err: Exception | None = None
-            for attempt in range(max(0, int(args.retries)) + 1):
-                try:
-                    raw = _call_gemini(
+            with genai.Client(api_key=api_key) as client:
+                for attempt in range(max(0, int(args.retries)) + 1):
+                    try:
+                        raw = _call_gemini(
+                            client=client,
+                            model=str(args.model),
+                            max_output_tokens=int(args.max_tokens),
+                            temperature=float(args.temperature),
+                            user_prompt=user_prompt,
+                            page_png_bytes=page_png_bytes,
+                            thinking_budget=thinking_budget,
+                        )
+                        last_err = None
+                        break
+                    except Exception as e:
+                        last_err = e
+                        retryable = False
+                        code = None
+                        if isinstance(e, getattr(genai_errors, "APIError", Exception)):
+                            try:
+                                code = int(getattr(e, "code", 0) or 0)
+                            except Exception:
+                                code = None
+                            retryable = code in {429, 500, 502, 503, 504}
+                        if isinstance(e, (TimeoutError, ConnectionError)):
+                            retryable = True
+                        if (not retryable) or attempt >= int(args.retries):
+                            break
+                        sleep_s = min(
+                            float(args.retry_max_seconds),
+                            float(args.retry_base_seconds) * (float(args.retry_backoff) ** float(attempt)),
+                        )
+                        time.sleep(max(0.0, float(sleep_s)))
+
+                if last_err is not None:
+                    _write_text(
+                        out_page_dir / "error.txt",
+                        f"Model call failed after retries. error={type(last_err).__name__}: {last_err}\n",
+                    )
+                    if args.save_raw and raw:
+                        _write_text(out_page_dir / "raw.txt", raw)
+                    return
+
+                page_block = _extract_page_markup(raw)
+                if not page_block:
+                    # One deterministic "format repair" attempt to coerce proper HTML markers.
+                    repair_prompt = _build_format_repair_prompt(user_prompt=user_prompt, last_raw=raw)
+                    raw2 = _call_gemini(
                         client=client,
                         model=str(args.model),
                         max_output_tokens=int(args.max_tokens),
                         temperature=float(args.temperature),
-                        user_prompt=user_prompt,
+                        user_prompt=repair_prompt,
                         page_png_bytes=page_png_bytes,
                         thinking_budget=thinking_budget,
                     )
-                    last_err = None
-                    break
-                except Exception as e:
-                    last_err = e
-                    retryable = False
-                    code = None
-                    if isinstance(e, getattr(genai_errors, "APIError", Exception)):
-                        try:
-                            code = int(getattr(e, "code", 0) or 0)
-                        except Exception:
-                            code = None
-                        retryable = code in {429, 500, 502, 503, 504}
-                    if isinstance(e, (TimeoutError, ConnectionError)):
-                        retryable = True
-                    if (not retryable) or attempt >= int(args.retries):
-                        break
-                    sleep_s = min(
-                        float(args.retry_max_seconds),
-                        float(args.retry_base_seconds) * (float(args.retry_backoff) ** float(attempt)),
-                    )
-                    time.sleep(max(0.0, float(sleep_s)))
-
-            if last_err is not None:
-                _write_text(out_page_dir / "error.txt", f"Model call failed after retries. error={type(last_err).__name__}: {last_err}\n")
-                if args.save_raw and raw:
-                    _write_text(out_page_dir / "raw.txt", raw)
-                continue
-
-            page_block = _extract_page_markup(raw)
-            if not page_block:
-                # One deterministic "format repair" attempt to coerce proper HTML markers.
-                repair_prompt = _build_format_repair_prompt(user_prompt=user_prompt, last_raw=raw)
-                raw2 = _call_gemini(
-                    client=client,
-                    model=str(args.model),
-                    max_output_tokens=int(args.max_tokens),
-                    temperature=float(args.temperature),
-                    user_prompt=repair_prompt,
-                    page_png_bytes=page_png_bytes,
-                    thinking_budget=thinking_budget,
-                )
-                if args.save_raw and raw2:
-                    _write_text(out_page_dir / "raw_repair.txt", raw2)
-                page_block = _extract_page_markup(raw2)
+                    if args.save_raw and raw2:
+                        _write_text(out_page_dir / "raw_repair.txt", raw2)
+                    page_block = _extract_page_markup(raw2)
 
             if not page_block:
                 _write_text(out_page_dir / "error.txt", "Model output missing PAGE_START/PAGE_END markers.\n\nRAW:\n" + (raw or "") + "\n")
                 if args.save_raw and raw:
                     _write_text(out_page_dir / "raw.txt", raw)
-                continue
+                return
 
             warnings = _validate_page_block(meta=meta, page_block=page_block)
             if warnings:
                 _write_json(out_page_dir / "warnings.json", {"warnings": warnings})
 
-            # Point relative URLs to the output bundle root (which symlinks images/ and contains css_library.css).
-            base_href = _rel_base_href(from_dir=chunks_dir, to_dir=out_bundle_dir)
             chunk_html = _wrap_chunk_html(page_block=page_block, base_href=base_href, title=str(args.title))
             chunk_path = chunks_dir / f"chunk_{pno:03d}_{pno:03d}.html"
             _write_text(chunk_path, chunk_html)
@@ -737,6 +751,18 @@ def main() -> int:
             _write_text(out_page_dir / "page_block.html", page_block)
             if args.save_raw:
                 _write_text(out_page_dir / "raw.txt", raw)
+        except Exception as e:
+            _write_text(out_page_dir / "error.txt", f"Unhandled error: {type(e).__name__}: {e}\n")
+
+    with ThreadPoolExecutor(max_workers=max_conc) as ex:
+        futures = {ex.submit(_process_one_page, pno): pno for pno in pages_to_run}
+        for fut in as_completed(futures):
+            _ = futures[fut]
+            try:
+                fut.result()
+            except Exception:
+                # _process_one_page catches and records errors; this is defensive.
+                pass
 
     # Assemble a single previewable HTML for the bundle.
     _assemble_preview_html(out_bundle_dir=out_bundle_dir, title=str(args.title))

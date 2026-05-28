@@ -21,11 +21,11 @@ services:
       - key: PPTAGENT_MAX_UPLOAD_MB
         value: "50"
 
-      # Default mode: Gemma for text translation + image descriptions, Gemini for the rest
+      # Default mode: single_model (Gemini). If you choose mixed_models, only image descriptions use Gemma.
       - key: PPTAGENT_DEFAULT_PIPELINE_MODE
-        value: mixed_models
+        value: single_model
       - key: PPTAGENT_DEFAULT_MODEL_TRANSLATE
-        value: gemma-4-31b-it
+        value: gemini-3.1-flash-lite
       - key: PPTAGENT_DEFAULT_MODEL_IMAGE_DESC
         value: gemma-4-31b-it
       - key: PPTAGENT_DEFAULT_MODEL_REST

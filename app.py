@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, File, Header, HTTPException, Query, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 
@@ -42,7 +43,7 @@ DEFAULT_THINKING_BUDGET = int(os.getenv("PPTAGENT_DEFAULT_THINKING_BUDGET", "0")
 
 # mixed_models defaults
 DEFAULT_MODEL_TRANSLATE = (
-    (os.getenv("PPTAGENT_DEFAULT_MODEL_TRANSLATE") or "gemma-4-31b-it").strip() or "gemma-4-31b-it"
+    (os.getenv("PPTAGENT_DEFAULT_MODEL_TRANSLATE") or "gemini-3.1-flash-lite").strip() or "gemini-3.1-flash-lite"
 )
 DEFAULT_MODEL_IMAGE_DESC = (
     (os.getenv("PPTAGENT_DEFAULT_MODEL_IMAGE_DESC") or "gemma-4-31b-it").strip() or "gemma-4-31b-it"
@@ -275,6 +276,15 @@ async def _run_job(job_id: str) -> None:
 
 
 app = FastAPI(title="PPTAgent FastAPI (Render)")
+
+# Allow browser-based local UI (and other frontends) to call the API.
+# Note: CORS only affects browsers; it is not an authentication mechanism.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 _semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
 _active_tasks: dict[str, asyncio.Task[None]] = {}

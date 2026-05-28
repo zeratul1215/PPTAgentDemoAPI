@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -361,6 +362,12 @@ def _parse_args() -> argparse.Namespace:
         default=2,
         help="Max repair attempts per page when output fails validation (default: 2)",
     )
+    p.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=3,
+        help="Max concurrent in-flight model calls across pages (default: 3).",
+    )
     return p.parse_args()
 
 
@@ -414,19 +421,25 @@ def main() -> int:
     api_key = _get_api_key(args)
     genai, _types = _import_google_genai()
 
-    with genai.Client(api_key=api_key) as client:
-        for pno in range(page_start, page_end + 1):
-            idx0 = pno - 1
-            if idx0 >= len(pages):
-                break
-            req = _build_request(page_1based=pno, plan_page_json=pages[idx0])
-            user_prompt = _build_user_prompt(request_obj=req)
+    last_page = min(page_end, len(pages))
+    pages_to_run = list(range(page_start, last_page + 1))
+    max_conc = max(1, int(args.max_concurrency))
 
-            last_raw = ""
-            last_obj: dict[str, Any] | None = None
-            last_validation_err: str | None = None
+    def _process_one_page(pno: int) -> None:
+        req_path = out_dir / f"page_{pno:03d}.request.json"
+        if not req_path.exists():
+            raise RuntimeError(f"missing request.json: {req_path}")
+        req = _read_json(req_path)
+        if not isinstance(req, dict):
+            raise RuntimeError(f"invalid request.json: {req_path}")
+        user_prompt = _build_user_prompt(request_obj=req)
 
-            max_repairs = max(0, int(args.max_repairs))
+        last_raw = ""
+        last_obj: dict[str, Any] | None = None
+        last_validation_err: str | None = None
+
+        max_repairs = max(0, int(args.max_repairs))
+        with genai.Client(api_key=api_key) as client:
             for attempt in range(0, 1 + max_repairs):
                 raw, out_obj = _call_gemini(
                     client=client,
@@ -463,12 +476,24 @@ def main() -> int:
                     )
                     continue
 
-            if last_validation_err is not None:
-                _write_text(
-                    out_dir / f"page_{pno:03d}.error.txt",
-                    "Model output failed validation.\n" + f"error={last_validation_err}\n\nRAW:\n" + (last_raw or "") + "\n",
-                )
-                raise SystemExit(f"page {pno}: model output failed validation: {last_validation_err}")
+        if last_validation_err is not None:
+            _write_text(
+                out_dir / f"page_{pno:03d}.error.txt",
+                "Model output failed validation.\n" + f"error={last_validation_err}\n\nRAW:\n" + (last_raw or "") + "\n",
+            )
+            raise RuntimeError(f"model output failed validation: {last_validation_err}")
+
+    with ThreadPoolExecutor(max_workers=max_conc) as ex:
+        futures = {ex.submit(_process_one_page, pno): pno for pno in pages_to_run}
+        for fut in as_completed(futures):
+            pno = futures[fut]
+            try:
+                fut.result()
+            except Exception as e:
+                # Best-effort cancel pending tasks; running tasks may not stop.
+                for f in futures:
+                    f.cancel()
+                raise SystemExit(f"page {pno}: {type(e).__name__}: {e}")
 
     print(str(out_dir))
     return 0

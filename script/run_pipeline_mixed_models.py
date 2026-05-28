@@ -98,8 +98,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--model-translate",
         type=str,
-        default="gemma-4-31b-it",
-        help="Model for translation (default: gemma-4-31b-it)",
+        default="gemini-3.1-flash-lite",
+        help="Model for translation (default: gemini-3.1-flash-lite)",
     )
     p.add_argument(
         "--model-image-desc",

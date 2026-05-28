@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -277,6 +278,12 @@ def _parse_args() -> argparse.Namespace:
         help="Env var names to check for API key (default: GEMINI_API_KEY GOOGLE_API_KEY)",
     )
     p.add_argument("--save-raw", action="store_true", help="Save raw model output next to result JSON.")
+    p.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=3,
+        help="Max concurrent in-flight model calls across pages (default: 3).",
+    )
     return p.parse_args()
 
 
@@ -358,24 +365,29 @@ def main() -> int:
     api_key = _get_api_key(args)
     genai, _types, genai_errors = _import_google_genai()
 
-    with genai.Client(api_key=api_key) as client:
-        for page_1based, metas, req in page_requests:
-            page_png_path = Path(req["inputs"]["page_png"])
-            asset_paths = [Path(p) for p in (req["inputs"].get("asset_pngs") or [])]
-            if not page_png_path.exists():
-                raise SystemExit(f"missing page_png: {page_png_path}")
-            missing_assets = [p for p in asset_paths if not p.exists()]
-            if missing_assets:
-                raise SystemExit(f"missing asset_png(s): {missing_assets[:5]}{' ...' if len(missing_assets) > 5 else ''}")
+    max_conc = max(1, int(args.max_concurrency))
 
-            asset_pngs: list[tuple[str, bytes]] = []
-            for m in metas:
-                asset_path = bundle_dir / m.src
-                asset_pngs.append((m.image_id, asset_path.read_bytes()))
+    def _process_one_page(page_1based: int, metas: list[ImageMeta], req: dict[str, Any]) -> None:
+        page_png_path = Path(req["inputs"]["page_png"])
+        asset_paths = [Path(p) for p in (req["inputs"].get("asset_pngs") or [])]
+        if not page_png_path.exists():
+            raise RuntimeError(f"missing page_png: {page_png_path}")
+        missing_assets = [p for p in asset_paths if not p.exists()]
+        if missing_assets:
+            raise RuntimeError(f"missing asset_png(s): {missing_assets[:5]}{' ...' if len(missing_assets) > 5 else ''}")
 
-            raw: str = ""
-            out_obj: dict[str, Any] | None = None
-            last_err: Exception | None = None
+        asset_pngs: list[tuple[str, bytes]] = []
+        for m in metas:
+            asset_path = bundle_dir / m.src
+            asset_pngs.append((m.image_id, asset_path.read_bytes()))
+
+        page_out_dir = out_dir / f"page_{page_1based:03d}"
+        page_out_dir.mkdir(parents=True, exist_ok=True)
+
+        raw: str = ""
+        out_obj: dict[str, Any] | None = None
+        last_err: Exception | None = None
+        with genai.Client(api_key=api_key) as client:
             for attempt in range(max(0, int(args.retries)) + 1):
                 try:
                     raw, out_obj = _call_gemini_describe_page_images(
@@ -412,39 +424,47 @@ def main() -> int:
                     )
                     time.sleep(max(0.0, float(sleep_s)))
 
-            page_out_dir = out_dir / f"page_{page_1based:03d}"
-            page_out_dir.mkdir(parents=True, exist_ok=True)
-
-            if last_err is not None:
-                (page_out_dir / "error.txt").write_text(
-                    f"Model call failed after retries. error={type(last_err).__name__}: {last_err}\n",
-                    encoding="utf-8",
-                )
-                if args.save_raw and raw:
-                    (page_out_dir / "raw.txt").write_text(raw or "", encoding="utf-8")
-                continue
-
-            if not isinstance(out_obj, dict) or not isinstance(out_obj.get("images"), list):
-                (page_out_dir / "error.txt").write_text(
-                    "Model output is not valid JSON with field 'images' (array).\n\nRAW:\n" + (raw or "") + "\n",
-                    encoding="utf-8",
-                )
-                continue
-
-            (page_out_dir / "result.json").write_text(json.dumps(out_obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            # Fan out per-image text files.
-            by_id: dict[str, str] = {}
-            for it in out_obj.get("images") or []:
-                if isinstance(it, dict) and isinstance(it.get("id"), str) and isinstance(it.get("text"), str):
-                    by_id[it["id"]] = it["text"].strip()
-            for m in metas:
-                txt = by_id.get(m.image_id)
-                if txt:
-                    (page_out_dir / f"{m.image_id}.text.txt").write_text(txt + "\n", encoding="utf-8")
-                else:
-                    (page_out_dir / f"{m.image_id}.missing.txt").write_text("missing description for this image id\n", encoding="utf-8")
-            if args.save_raw:
+        if last_err is not None:
+            (page_out_dir / "error.txt").write_text(
+                f"Model call failed after retries. error={type(last_err).__name__}: {last_err}\n",
+                encoding="utf-8",
+            )
+            if args.save_raw and raw:
                 (page_out_dir / "raw.txt").write_text(raw or "", encoding="utf-8")
+            return
+
+        if not isinstance(out_obj, dict) or not isinstance(out_obj.get("images"), list):
+            (page_out_dir / "error.txt").write_text(
+                "Model output is not valid JSON with field 'images' (array).\n\nRAW:\n" + (raw or "") + "\n",
+                encoding="utf-8",
+            )
+            return
+
+        (page_out_dir / "result.json").write_text(json.dumps(out_obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        # Fan out per-image text files.
+        by_id: dict[str, str] = {}
+        for it in out_obj.get("images") or []:
+            if isinstance(it, dict) and isinstance(it.get("id"), str) and isinstance(it.get("text"), str):
+                by_id[it["id"]] = it["text"].strip()
+        for m in metas:
+            txt = by_id.get(m.image_id)
+            if txt:
+                (page_out_dir / f"{m.image_id}.text.txt").write_text(txt + "\n", encoding="utf-8")
+            else:
+                (page_out_dir / f"{m.image_id}.missing.txt").write_text("missing description for this image id\n", encoding="utf-8")
+        if args.save_raw:
+            (page_out_dir / "raw.txt").write_text(raw or "", encoding="utf-8")
+
+    with ThreadPoolExecutor(max_workers=max_conc) as ex:
+        futures = {ex.submit(_process_one_page, pno, metas, req): pno for pno, metas, req in page_requests}
+        for fut in as_completed(futures):
+            pno = futures[fut]
+            try:
+                fut.result()
+            except Exception as e:
+                for f in futures:
+                    f.cancel()
+                raise SystemExit(f"page {pno}: {type(e).__name__}: {e}")
 
     print(str(out_dir))
     return 0
