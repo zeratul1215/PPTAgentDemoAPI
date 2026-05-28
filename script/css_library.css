@@ -1,0 +1,282 @@
+/* Minimal, generic slide CSS library (16:9).
+ *
+ * Goal: few, reusable classes for common PPT-like layouts.
+ * - Fixed page size (.page) for print/PDF.
+ * - Generic layout utilities (flex/grid/stack).
+ * - 3-level typography scale (lg/md/sm).
+ * - Simple reusable surfaces (band/card/badge).
+ * - Image helpers (frame + cover/contain).
+ *
+ * Assumption: no legacy HTML / consumers need compatibility with the old V3 CSS class set.
+ */
+
+/* Design tokens (colors/spacing/radius/typography). */
+:root {
+  --paper: #ffffff;
+  --ink: #101114;
+  --muted: #6c6f78;
+
+  --purple: #654b8c;
+  --orange: #c9674f;
+  --green: #0c5c37;
+
+  /* Accent color (set via .accent-* or inline style). */
+  --accent: var(--purple);
+  --accent-ink: #ffffff;
+
+  /* Spacing scale (small/medium/large). */
+  --space-s: 12pt;
+  --space-m: 18pt;
+  --space-l: 28pt;
+
+  /* Radius scale. */
+  --radius: 18pt;
+  --radius-pill: 999pt;
+
+  /* Typography scale (large/medium/small). */
+  --text-lg: 32pt;
+  --text-md: 18pt;
+  --text-sm: 13pt;
+  --lh-lg: 1.15;
+  --lh-md: 1.35;
+  --lh-sm: 1.55;
+}
+
+/* Global reset for predictable print layout. */
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Fixed page size for all slides (pt). */
+@page {
+  size: 959.76pt 540pt;
+  margin: 0;
+}
+
+/* App canvas background (outside pages). */
+body {
+  background: #e9eaee;
+}
+
+/* .page: root container for each slide (fixed size + page break + font stack). */
+.page {
+  width: 959.76pt;
+  height: 540pt;
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  overflow: hidden;
+  page-break-after: always;
+}
+
+/* Font policy: Office-friendly stack applied to everything inside .page. */
+.page,
+.page * {
+  font-family: Calibri, Arial, "Songti SC", "PingFang SC", "Hiragino Sans GB", "Heiti SC", "Microsoft YaHei",
+    SimSun, sans-serif !important;
+}
+
+/* Palette helpers (set --accent). */
+.accent-purple {
+  --accent: var(--purple);
+}
+.accent-orange {
+  --accent: var(--orange);
+}
+.accent-green {
+  --accent: var(--green);
+}
+
+/* Layout utilities */
+.u-flex {
+  display: flex;
+  gap: var(--gap, var(--space-m));
+}
+
+.u-grid {
+  display: grid;
+  gap: var(--gap, var(--space-m));
+}
+
+.u-row {
+  flex-direction: row;
+}
+
+.u-col {
+  flex-direction: column;
+}
+
+.u-center {
+  align-items: center;
+  justify-content: center;
+}
+
+.u-between {
+  justify-content: space-between;
+}
+
+.u-wrap {
+  flex-wrap: wrap;
+}
+
+/* Spacing helpers:
+ * - .gap + (.s/.m/.l) controls gap via CSS variable --gap
+ * - .pad/.pad-x/.pad-y + (.s/.m/.l) controls padding via variables
+ */
+.gap {
+  gap: var(--gap, var(--space-m));
+}
+
+.pad {
+  padding: var(--pad, var(--space-m));
+}
+
+.pad-x {
+  padding: 0 var(--pad-x, var(--space-m));
+}
+
+.pad-y {
+  padding: var(--pad-y, var(--space-m)) 0;
+}
+
+.s {
+  --gap: var(--space-s);
+  --pad: var(--space-s);
+  --pad-x: var(--space-s);
+  --pad-y: var(--space-s);
+  --stack-gap: var(--space-s);
+}
+
+.m {
+  --gap: var(--space-m);
+  --pad: var(--space-m);
+  --pad-x: var(--space-m);
+  --pad-y: var(--space-m);
+  --stack-gap: var(--space-m);
+}
+
+.l {
+  --gap: var(--space-l);
+  --pad: var(--space-l);
+  --pad-x: var(--space-l);
+  --pad-y: var(--space-l);
+  --stack-gap: var(--space-l);
+}
+
+/* Stack: automatic vertical rhythm (adds spacing between direct children). */
+.stack > * + * {
+  margin-top: var(--stack-gap, var(--space-m));
+}
+
+/* Typography (3 sizes) */
+.t-lg {
+  font-size: var(--text-lg);
+  font-weight: 900;
+  line-height: var(--lh-lg);
+  letter-spacing: 0.4pt;
+  color: inherit;
+}
+
+.t-md {
+  font-size: var(--text-md);
+  font-weight: 700;
+  line-height: var(--lh-md);
+  letter-spacing: 0.2pt;
+  color: inherit;
+  overflow-wrap: anywhere;
+}
+
+.t-sm {
+  font-size: var(--text-sm);
+  line-height: var(--lh-sm);
+  color: inherit;
+  overflow-wrap: anywhere;
+}
+
+.t-muted {
+  color: var(--muted);
+}
+
+.t-strong {
+  font-weight: 900;
+}
+
+.ls-wide {
+  letter-spacing: 0.8pt;
+}
+
+/* Images */
+.img-frame {
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: #f2f3f6;
+  border: 1pt solid rgba(16, 17, 20, 0.08);
+}
+
+.img-cover,
+.img-contain {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.img-cover {
+  object-fit: cover;
+}
+
+.img-contain {
+  object-fit: contain;
+}
+
+/* Surfaces */
+.band {
+  background: var(--accent);
+  color: var(--accent-ink);
+  padding: var(--space-m) var(--space-l);
+}
+
+.card {
+  border-radius: var(--radius);
+  padding: var(--space-m);
+  background: rgba(255, 255, 255, 0.92);
+  border: 1pt solid rgba(16, 17, 20, 0.08);
+  color: var(--ink);
+}
+
+.card-accent {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border: none;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-pill);
+  padding: 6pt 12pt;
+  font-weight: 900;
+  letter-spacing: 0.4pt;
+  font-size: 12pt;
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+/* Optional list helpers (commonly needed in slides). */
+.list-reset {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cols-2 {
+  columns: 2;
+  column-gap: var(--space-l);
+}
+

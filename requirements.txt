@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+python-multipart
+
+# Pipeline deps
+pymupdf
+pillow
+lxml
+playwright
+
+# Google AI Studio (Gemini/Gemma)
+google-genai
+
