@@ -16,6 +16,7 @@
     "GEMINI_API_KEY": "${localEnv:GEMINI_API_KEY}"
   },
 
+  "runArgs": ["--network=host"],
   "forwardPorts": [8000],
   "portsAttributes": {
     "8000": {

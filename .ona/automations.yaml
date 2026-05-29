@@ -2,6 +2,18 @@ services:
   api:
     name: FastAPI Server
     description: PPTAgent FastAPI server on port 8000.
+    triggeredBy:
+      - postEnvironmentStart
     commands:
       start: uvicorn app:app --host 0.0.0.0 --port 8000
       ready: curl -sf http://localhost:8000/docs
+
+tasks:
+  open-port:
+    name: Open port 8000
+    description: Expose port 8000 publicly via Ona port sharing.
+    triggeredBy:
+      - postEnvironmentStart
+    command: |
+      until curl -sf http://localhost:8000/docs; do sleep 2; done
+      ona environment port open 8000 --name "FastAPI" --admission everyone
