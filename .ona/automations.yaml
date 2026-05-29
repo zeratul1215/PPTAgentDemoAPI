@@ -1,13 +1,3 @@
-tasks:
-  install:
-    name: Install dependencies
-    description: Install Python dependencies and Playwright browser.
-    command: |
-      pip install -r requirements.txt
-      playwright install chromium
-    triggeredBy:
-      - postDevcontainerStart
-
 services:
   api:
     name: FastAPI Server
