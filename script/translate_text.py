@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -210,8 +211,9 @@ def _import_google_genai():
     try:
         from google import genai  # type: ignore
         from google.genai import types  # type: ignore
+        from google.genai import errors  # type: ignore
 
-        return genai, types
+        return genai, types, errors
     except Exception:
         repo_root = Path(__file__).resolve().parents[1]
         local_src = repo_root / "python-genai"
@@ -221,8 +223,9 @@ def _import_google_genai():
                 sys.path.insert(0, ps)
             from google import genai  # type: ignore
             from google.genai import types  # type: ignore
+            from google.genai import errors  # type: ignore
 
-            return genai, types
+            return genai, types, errors
         raise
 
 
@@ -234,7 +237,7 @@ def _call_gemini(
     temperature: float,
     user_prompt: str,
 ) -> tuple[str, dict[str, Any] | None]:
-    genai, types = _import_google_genai()
+    _genai, types, _errors = _import_google_genai()
 
     response = client.models.generate_content(
         model=model,
@@ -259,6 +262,56 @@ def _call_gemini(
         return raw_text, obj if isinstance(obj, dict) else None
     except Exception:
         return raw_text, None
+
+
+def _call_gemini_with_retries(
+    *,
+    genai_errors: Any,
+    client: Any,
+    model: str,
+    max_output_tokens: int,
+    temperature: float,
+    user_prompt: str,
+    retries: int,
+    retry_base_seconds: float,
+    retry_max_seconds: float,
+    retry_backoff: float,
+) -> tuple[str, dict[str, Any] | None]:
+    last_err: Exception | None = None
+    raw: str = ""
+    out_obj: dict[str, Any] | None = None
+    for attempt in range(max(0, int(retries)) + 1):
+        try:
+            raw, out_obj = _call_gemini(
+                client=client,
+                model=model,
+                max_output_tokens=max_output_tokens,
+                temperature=temperature,
+                user_prompt=user_prompt,
+            )
+            return raw, out_obj
+        except Exception as e:
+            last_err = e
+            retryable = False
+            code = None
+            api_err_cls = getattr(genai_errors, "APIError", None)
+            if api_err_cls and isinstance(e, api_err_cls):
+                try:
+                    code = int(getattr(e, "code", 0) or 0)
+                except Exception:
+                    code = None
+                retryable = code in {429, 500, 502, 503, 504}
+            if isinstance(e, (TimeoutError, ConnectionError)):
+                retryable = True
+            if (not retryable) or attempt >= int(retries):
+                break
+            sleep_s = min(
+                float(retry_max_seconds),
+                float(retry_base_seconds) * (float(retry_backoff) ** float(attempt)),
+            )
+            time.sleep(max(0.0, float(sleep_s)))
+    assert last_err is not None
+    raise last_err
 
 
 def _validate_output(*, req: dict[str, Any], out_obj: dict[str, Any]) -> list[str]:
@@ -368,6 +421,10 @@ def _parse_args() -> argparse.Namespace:
         default=3,
         help="Max concurrent in-flight model calls across pages (default: 3).",
     )
+    p.add_argument("--retries", type=int, default=8, help="Retry count on transient 5xx/429 (default: 8)")
+    p.add_argument("--retry-base-seconds", type=float, default=2.0, help="Base sleep seconds for retry backoff (default: 2.0)")
+    p.add_argument("--retry-max-seconds", type=float, default=60.0, help="Max sleep seconds per retry (default: 60.0)")
+    p.add_argument("--retry-backoff", type=float, default=2.0, help="Exponential backoff multiplier (default: 2.0)")
     return p.parse_args()
 
 
@@ -419,7 +476,7 @@ def main() -> int:
         return 0
 
     api_key = _get_api_key(args)
-    genai, _types = _import_google_genai()
+    genai, _types, genai_errors = _import_google_genai()
 
     last_page = min(page_end, len(pages))
     pages_to_run = list(range(page_start, last_page + 1))
@@ -441,13 +498,21 @@ def main() -> int:
         max_repairs = max(0, int(args.max_repairs))
         with genai.Client(api_key=api_key) as client:
             for attempt in range(0, 1 + max_repairs):
-                raw, out_obj = _call_gemini(
-                    client=client,
-                    model=str(args.model),
-                    max_output_tokens=int(args.max_tokens),
-                    temperature=float(args.temperature),
-                    user_prompt=user_prompt,
-                )
+                try:
+                    raw, out_obj = _call_gemini_with_retries(
+                        genai_errors=genai_errors,
+                        client=client,
+                        model=str(args.model),
+                        max_output_tokens=int(args.max_tokens),
+                        temperature=float(args.temperature),
+                        user_prompt=user_prompt,
+                        retries=int(args.retries),
+                        retry_base_seconds=float(args.retry_base_seconds),
+                        retry_max_seconds=float(args.retry_max_seconds),
+                        retry_backoff=float(args.retry_backoff),
+                    )
+                except Exception as e:
+                    raise RuntimeError(f"model call failed after retries: {type(e).__name__}: {e}") from e
                 last_raw = raw or ""
                 last_obj = out_obj if isinstance(out_obj, dict) else None
 
