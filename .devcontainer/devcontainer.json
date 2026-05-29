@@ -7,8 +7,8 @@
   // Use "image": "mcr.microsoft.com/devcontainers/base:2.0.4-noble",
   // instead of the build to use a pre-built image.
   "build": {
-    "context": ".",
-    "dockerfile": "Dockerfile"
+    "context": "..",
+    "dockerfile": ".devcontainer/Dockerfile"
   },
   "containerEnv": {
     "GEMINI_API_KEY": "AIzaSyCko-wzGW31LbUdrdiwNZX6IlE5T5eXcBY"
