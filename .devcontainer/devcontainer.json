@@ -16,11 +16,11 @@
     "GEMINI_API_KEY": "${localEnv:GEMINI_API_KEY}"
   },
 
-  "forwardPorts":[8000],
+  "forwardPorts": [8000],
   "portsAttributes": {
     "8000": {
       "label": "FastAPI",
-      "onAutoForward": "notify"
+      "onAutoForward": "openBrowserOnce"
     }
   }
 }
