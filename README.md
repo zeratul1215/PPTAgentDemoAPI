@@ -13,6 +13,7 @@ Assumption: no legacy data / consumers need compatibility.
   - `file`: 上传的 `.pdf`
 
 Query（可选）：
+
 - `pipeline_mode`: `single_model` | `mixed_models`
 - `page_start` / `page_end` / `dpi`
 - `single_model`:
@@ -21,6 +22,7 @@ Query（可选）：
   - `model_translate` / `model_image_desc` / `model_rest` / `thinking_budget_rest`
 
 返回：
+
 - `{ "job_id": "..." }`
 
 ### 轮询/下载
@@ -32,12 +34,15 @@ Query（可选）：
 ## 环境变量
 
 必须：
+
 - `GEMINI_API_KEY`（Gemini/Gemma 都使用同一个 key；也兼容 `GOOGLE_API_KEY`）
 
 可选（开启鉴权）：
+
 - `PPTAGENT_API_TOKEN`（启用后所有请求要带 `Authorization: Bearer <token>`）
 
 存储：
+
 - `PPTAGENT_DATA_DIR`（Render 建议挂载到 persistent disk 的 mountPath，比如 `/app/result`）
 
 ## 本地运行（Docker）
@@ -64,8 +69,3 @@ curl "http://localhost:10000/jobs/<job_id>?logs_tail=200"
 # 下载最终 PDF
 curl -L "http://localhost:10000/jobs/<job_id>?download=1" --output out_repaired.pdf
 ```
-
-## Render 部署
-
-把本目录作为一个独立 repo push 到 GitHub，然后在 Render 用 Blueprint 指向本 repo（会读取 `render.yaml`）。
-
