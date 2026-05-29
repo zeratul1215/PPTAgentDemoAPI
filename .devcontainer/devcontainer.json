@@ -16,7 +16,7 @@
     "GEMINI_API_KEY": "${localEnv:GEMINI_API_KEY}"
   },
 
-  "forwardPorts":,
+  "forwardPorts":[8000],
   "portsAttributes": {
     "8000": {
       "label": "FastAPI",
