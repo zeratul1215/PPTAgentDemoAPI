@@ -7,10 +7,16 @@
   "secrets": {
     "GEMINI_API_KEY": {}
   },
+  
+  // 1. 让容器在完全启动前，自动把 Secret 文件的内容追加到全局环境变量中
+  "updateContentCommand": "echo 'export GEMINI_API_KEY=$(cat /usr/local/secrets/GEMINI_API_KEY 2>/dev/null)' >> ~/.bashrc",
+
+  // 2. 告诉容器运行时，准备好承载这个环境变量
   "containerEnv": {
     "GEMINI_API_KEY": "${localEnv:GEMINI_API_KEY}"
   },
-  "forwardPorts": [8000],
+
+  "forwardPorts":,
   "portsAttributes": {
     "8000": {
       "label": "FastAPI",
