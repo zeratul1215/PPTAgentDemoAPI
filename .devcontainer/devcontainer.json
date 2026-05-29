@@ -7,6 +7,9 @@
   "secrets": {
     "GEMINI_API_KEY": {}
   },
+  "containerEnv": {
+    "GEMINI_API_KEY": "${localEnv:GEMINI_API_KEY}"
+  },
   "forwardPorts": [8000],
   "portsAttributes": {
     "8000": {
