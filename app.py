@@ -281,7 +281,7 @@ app = FastAPI(title="PPTAgent FastAPI (Render)")
 # Note: CORS only affects browsers; it is not an authentication mechanism.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*", "null"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
