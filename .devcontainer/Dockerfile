@@ -24,4 +24,6 @@ RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
 COPY requirements.txt /tmp/requirements.txt
 RUN pip3 install --break-system-packages -r /tmp/requirements.txt
 
-RUN playwright install chromium
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN playwright install --with-deps chromium \
+    && chmod -R 777 /ms-playwright
