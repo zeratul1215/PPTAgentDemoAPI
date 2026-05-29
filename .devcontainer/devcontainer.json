@@ -10,7 +10,7 @@
     "context": ".",
     "dockerfile": "Dockerfile"
   },
-  "secrets": {
+  "containerEnv": {
     "GEMINI_API_KEY": "AIzaSyCko-wzGW31LbUdrdiwNZX6IlE5T5eXcBY"
   }
   // Features add additional features to your environment. See https://containers.dev/features
