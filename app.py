@@ -517,9 +517,25 @@ async def get_job_html_asset(
     asset_path = (asset_path or "").lstrip("/")
     if not asset_path:
         asset_path = "index.html"
+    # Prevent path traversal like ../plan.json
+    if ".." in Path(asset_path).parts:
+        raise HTTPException(status_code=403, detail="invalid asset path")
 
-    p = (bundle_dir / asset_path).resolve()
-    if not str(p).startswith(str(bundle_dir) + os.sep):
+    run_dir = bundle_dir.parent.expanduser().resolve()
+    requested = (bundle_dir / asset_path)
+    p = requested.resolve()
+
+    def _is_under(child: Path, parent: Path) -> bool:
+        try:
+            child.relative_to(parent)
+            return True
+        except Exception:
+            return False
+
+    # Allow assets under:
+    # - bundle_dir (html_outcome/...)
+    # - run_dir (to support symlinked images -> ref_html/images/...)
+    if not (_is_under(p, bundle_dir) or _is_under(p, run_dir)):
         raise HTTPException(status_code=403, detail="invalid asset path")
     if not p.exists() or not p.is_file():
         raise HTTPException(status_code=404, detail="asset not found")
