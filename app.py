@@ -62,6 +62,27 @@ def _require_auth(authorization: str | None) -> None:
         raise HTTPException(status_code=401, detail="invalid token")
 
 
+def _require_auth_with_query(authorization: str | None, token_q: str | None) -> None:
+    """
+    Same auth as _require_auth, but allow passing the token via query param.
+
+    This is useful for loading HTML/CSS/img assets in a browser, because <img>/<link>
+    requests cannot attach Authorization headers.
+    """
+    if not API_TOKEN:
+        return
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+        if token == API_TOKEN:
+            return
+    if (token_q or "").strip() == API_TOKEN:
+        return
+    raise HTTPException(
+        status_code=401,
+        detail="missing/invalid token (use Authorization header or ?token=...)",
+    )
+
+
 def _normalize_pipeline_mode(raw: str | None) -> PipelineMode:
     v = (raw or "").strip().lower()
     if not v:
@@ -428,4 +449,79 @@ async def get_job(
         status = dict(status)
         status["logs_tail"] = _tail_text(_logs_path(job_id), logs_tail)
     return JSONResponse(status)
+
+
+def _bundle_dir_for_job(job_id: str, status: dict[str, Any]) -> Path:
+    """
+    Resolve the generated HTML bundle directory for a job.
+    Expected output structure:
+      <run_dir>/html_outcome/index.html
+    """
+    job_dir = _job_dir(job_id)
+
+    candidates: list[Path] = []
+    run_dir = status.get("run_dir")
+    if isinstance(run_dir, str) and run_dir.strip():
+        candidates.append(Path(run_dir).expanduser().resolve() / "html_outcome")
+
+    result_path = status.get("result_path")
+    if isinstance(result_path, str) and result_path.strip():
+        rp = Path(result_path).expanduser().resolve()
+        candidates.append(rp.parent / "html_outcome")
+
+    candidates.append(job_dir / "html_outcome")
+
+    for cand in candidates:
+        if (cand / "index.html").exists():
+            return cand
+
+    # Best-effort fallback: locate the newest html_outcome/index.html under the job dir.
+    if job_dir.exists():
+        matches = sorted(
+            job_dir.rglob("html_outcome/index.html"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if matches:
+            return matches[0].parent
+
+    raise HTTPException(status_code=404, detail="html outcome not available for this job")
+
+
+@app.get("/jobs/{job_id}/html")
+async def get_job_html_index(
+    job_id: str,
+    token: str | None = Query(default=None),
+    authorization: str | None = Header(default=None),
+):
+    _require_auth_with_query(authorization, token)
+    status = _read_status(job_id)
+    bundle_dir = _bundle_dir_for_job(job_id, status)
+    p = bundle_dir / "index.html"
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="index.html not found for this job")
+    return FileResponse(path=str(p), media_type="text/html")
+
+
+@app.get("/jobs/{job_id}/html/{asset_path:path}")
+async def get_job_html_asset(
+    job_id: str,
+    asset_path: str,
+    token: str | None = Query(default=None),
+    authorization: str | None = Header(default=None),
+):
+    _require_auth_with_query(authorization, token)
+    status = _read_status(job_id)
+    bundle_dir = _bundle_dir_for_job(job_id, status).expanduser().resolve()
+
+    asset_path = (asset_path or "").lstrip("/")
+    if not asset_path:
+        asset_path = "index.html"
+
+    p = (bundle_dir / asset_path).resolve()
+    if not str(p).startswith(str(bundle_dir) + os.sep):
+        raise HTTPException(status_code=403, detail="invalid asset path")
+    if not p.exists() or not p.is_file():
+        raise HTTPException(status_code=404, detail="asset not found")
+    return FileResponse(path=str(p))
 
