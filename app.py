@@ -10,9 +10,10 @@ import uuid
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, File, Header, HTTPException, Query, UploadFile
+from fastapi import Body, FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from playwright.sync_api import sync_playwright
 
 
 PipelineMode = Literal["single_model", "mixed_models"]
@@ -540,4 +541,48 @@ async def get_job_html_asset(
     if not p.exists() or not p.is_file():
         raise HTTPException(status_code=404, detail="asset not found")
     return FileResponse(path=str(p))
+
+
+def _export_pdf_from_html_sync(*, index_html: Path, out_pdf: Path) -> None:
+    index_html = index_html.expanduser().resolve()
+    out_pdf = out_pdf.expanduser().resolve()
+    if not index_html.exists():
+        raise FileNotFoundError(str(index_html))
+    out_pdf.parent.mkdir(parents=True, exist_ok=True)
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 720})
+        page.goto(index_html.as_uri(), wait_until="networkidle")
+        page.evaluate("() => (document.fonts ? document.fonts.ready : true)")
+        page.pdf(path=str(out_pdf), print_background=True, prefer_css_page_size=True)
+        browser.close()
+
+
+@app.post("/jobs/{job_id}/export/pdf")
+async def export_job_pdf(
+    job_id: str,
+    payload: dict[str, Any] = Body(...),
+    authorization: str | None = Header(default=None),
+):
+    _require_auth(authorization)
+    status = _read_status(job_id)
+    if status.get("status") not in ("done", "error"):
+        raise HTTPException(status_code=409, detail="job not finished")
+
+    html = payload.get("html") if isinstance(payload, dict) else None
+    if not isinstance(html, str) or not html.strip():
+        raise HTTPException(status_code=400, detail="missing html")
+
+    bundle_dir = _bundle_dir_for_job(job_id, status)
+    index_html = bundle_dir / "index_user_edited.html"
+    index_html.write_text(html, encoding="utf-8", errors="replace")
+
+    out_pdf = bundle_dir / "out_user_edited.pdf"
+    try:
+        await asyncio.to_thread(_export_pdf_from_html_sync, index_html=index_html, out_pdf=out_pdf)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"export failed: {e}")
+
+    return FileResponse(path=str(out_pdf), filename=f"{job_id}_edited.pdf", media_type="application/pdf")
 
