@@ -167,10 +167,13 @@ def main() -> int:
         "--no-ai-copy",
         "--no-assets",
     ]
-    if page_start > 1:
-        pdf_to_html_cmd += ["--page-start", str(page_start)]
-    if page_end > 0:
-        pdf_to_html_cmd += ["--page-end", str(page_end)]
+    # IMPORTANT:
+    # Keep the reference bundle as a full-document bundle so page_XXX indices stay aligned across:
+    # - plan.json pages[]
+    # - pages_png_dir/page_XXX.png
+    # - later stage scripts that index pages by 1-based page number
+    #
+    # Page range selection is applied in later stages via --page-start/--page-end.
     _run(pdf_to_html_cmd)
 
     # B) reference bundle -> plan.json.

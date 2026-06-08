@@ -10,9 +10,10 @@ import uuid
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, File, Header, HTTPException, Query, UploadFile
+from fastapi import Body, FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from playwright.sync_api import sync_playwright
 
 
 PipelineMode = Literal["single_model", "mixed_models"]
@@ -60,6 +61,27 @@ def _require_auth(authorization: str | None) -> None:
     token = authorization[7:].strip()
     if token != API_TOKEN:
         raise HTTPException(status_code=401, detail="invalid token")
+
+
+def _require_auth_with_query(authorization: str | None, token_q: str | None) -> None:
+    """
+    Same auth as _require_auth, but allow passing the token via query param.
+
+    This is useful for loading HTML/CSS/img assets in a browser, because <img>/<link>
+    requests cannot attach Authorization headers.
+    """
+    if not API_TOKEN:
+        return
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+        if token == API_TOKEN:
+            return
+    if (token_q or "").strip() == API_TOKEN:
+        return
+    raise HTTPException(
+        status_code=401,
+        detail="missing/invalid token (use Authorization header or ?token=...)",
+    )
 
 
 def _normalize_pipeline_mode(raw: str | None) -> PipelineMode:
@@ -428,4 +450,139 @@ async def get_job(
         status = dict(status)
         status["logs_tail"] = _tail_text(_logs_path(job_id), logs_tail)
     return JSONResponse(status)
+
+
+def _bundle_dir_for_job(job_id: str, status: dict[str, Any]) -> Path:
+    """
+    Resolve the generated HTML bundle directory for a job.
+    Expected output structure:
+      <run_dir>/html_outcome/index.html
+    """
+    job_dir = _job_dir(job_id)
+
+    candidates: list[Path] = []
+    run_dir = status.get("run_dir")
+    if isinstance(run_dir, str) and run_dir.strip():
+        candidates.append(Path(run_dir).expanduser().resolve() / "html_outcome")
+
+    result_path = status.get("result_path")
+    if isinstance(result_path, str) and result_path.strip():
+        rp = Path(result_path).expanduser().resolve()
+        candidates.append(rp.parent / "html_outcome")
+
+    candidates.append(job_dir / "html_outcome")
+
+    for cand in candidates:
+        if (cand / "index.html").exists():
+            return cand
+
+    # Best-effort fallback: locate the newest html_outcome/index.html under the job dir.
+    if job_dir.exists():
+        matches = sorted(
+            job_dir.rglob("html_outcome/index.html"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if matches:
+            return matches[0].parent
+
+    raise HTTPException(status_code=404, detail="html outcome not available for this job")
+
+
+@app.get("/jobs/{job_id}/html")
+async def get_job_html_index(
+    job_id: str,
+    token: str | None = Query(default=None),
+    authorization: str | None = Header(default=None),
+):
+    _require_auth_with_query(authorization, token)
+    status = _read_status(job_id)
+    bundle_dir = _bundle_dir_for_job(job_id, status)
+    p = bundle_dir / "index.html"
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="index.html not found for this job")
+    return FileResponse(path=str(p), media_type="text/html")
+
+
+@app.get("/jobs/{job_id}/html/{asset_path:path}")
+async def get_job_html_asset(
+    job_id: str,
+    asset_path: str,
+    token: str | None = Query(default=None),
+    authorization: str | None = Header(default=None),
+):
+    _require_auth_with_query(authorization, token)
+    status = _read_status(job_id)
+    bundle_dir = _bundle_dir_for_job(job_id, status).expanduser().resolve()
+
+    asset_path = (asset_path or "").lstrip("/")
+    if not asset_path:
+        asset_path = "index.html"
+    # Prevent path traversal like ../plan.json
+    if ".." in Path(asset_path).parts:
+        raise HTTPException(status_code=403, detail="invalid asset path")
+
+    run_dir = bundle_dir.parent.expanduser().resolve()
+    requested = (bundle_dir / asset_path)
+    p = requested.resolve()
+
+    def _is_under(child: Path, parent: Path) -> bool:
+        try:
+            child.relative_to(parent)
+            return True
+        except Exception:
+            return False
+
+    # Allow assets under:
+    # - bundle_dir (html_outcome/...)
+    # - run_dir (to support symlinked images -> ref_html/images/...)
+    if not (_is_under(p, bundle_dir) or _is_under(p, run_dir)):
+        raise HTTPException(status_code=403, detail="invalid asset path")
+    if not p.exists() or not p.is_file():
+        raise HTTPException(status_code=404, detail="asset not found")
+    return FileResponse(path=str(p))
+
+
+def _export_pdf_from_html_sync(*, index_html: Path, out_pdf: Path) -> None:
+    index_html = index_html.expanduser().resolve()
+    out_pdf = out_pdf.expanduser().resolve()
+    if not index_html.exists():
+        raise FileNotFoundError(str(index_html))
+    out_pdf.parent.mkdir(parents=True, exist_ok=True)
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 720})
+        page.goto(index_html.as_uri(), wait_until="networkidle")
+        page.evaluate("() => (document.fonts ? document.fonts.ready : true)")
+        page.pdf(path=str(out_pdf), print_background=True, prefer_css_page_size=True)
+        browser.close()
+
+
+@app.post("/jobs/{job_id}/export/pdf")
+async def export_job_pdf(
+    job_id: str,
+    payload: dict[str, Any] = Body(...),
+    authorization: str | None = Header(default=None),
+):
+    _require_auth(authorization)
+    status = _read_status(job_id)
+    if status.get("status") not in ("done", "error"):
+        raise HTTPException(status_code=409, detail="job not finished")
+
+    html = payload.get("html") if isinstance(payload, dict) else None
+    if not isinstance(html, str) or not html.strip():
+        raise HTTPException(status_code=400, detail="missing html")
+
+    bundle_dir = _bundle_dir_for_job(job_id, status)
+    index_html = bundle_dir / "index_user_edited.html"
+    index_html.write_text(html, encoding="utf-8", errors="replace")
+
+    out_pdf = bundle_dir / "out_user_edited.pdf"
+    try:
+        await asyncio.to_thread(_export_pdf_from_html_sync, index_html=index_html, out_pdf=out_pdf)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"export failed: {e}")
+
+    return FileResponse(path=str(out_pdf), filename=f"{job_id}_edited.pdf", media_type="application/pdf")
 
